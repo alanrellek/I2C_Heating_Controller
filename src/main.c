@@ -7,51 +7,110 @@
 #include "driver/gpio.h"
 #include "driver/adc.h"
 
-#define BLINK_GPIO 2
-#define POWER_GPIO 12
-#define TEMP_GPIO 36
-#define ADC1_CHANNEL_0 0
+#define LED_GPIO 2 // GPIO 2 is the built-in LED on the ESP32
+#define POWER_GPIO 12 // GPIO 12 is connected to the relay module
+#define ADC1_CHANNEL_0 0 // GPIO 36 is the ADC pin for the thermistor
+
+#define UPPER_TEMP 40
+#define LOWER_TEMP 39
+
+#define BUFFER_SIZE 100
+#define TEMP_DELTA_BUFFER_SIZE 100
+
+float temperatureBuffer[BUFFER_SIZE];
+int currentTempBufferIndex = 0;
+
+float temperatureDeltaBuffer[TEMP_DELTA_BUFFER_SIZE];
+int currentTempDeltaBufferIndex = 0;
+
+float readTemperature()
+{
+    // read the ADC value from the thermistor
+    int adc_reading = adc1_get_raw(ADC1_CHANNEL_0);
+    // printf("ADC Reading: %d\n", adc_reading);
+
+    // convert the ADC value to a voltage
+    float voltage = (adc_reading * 3.3) / 4095;
+    // printf("Voltage: %f\n", voltage);
+
+    // convert the voltage to a celcius temperature
+    float resistance = 10 * voltage / (3.3 - voltage);
+    // printf("Resistance: %f\n", resistance);
+
+    float tempKelvin = 1 / (1 / (273.15 + 25) + log(resistance / 10) / 3950.0);
+    float tempCelsius = tempKelvin - 273.15;
+
+    // printf("Temperature: %f\n", tempCelsius);
+    return tempCelsius;
+}
+
+void updateTempBuffer(float temperature)
+{
+    // Store the temperature in the buffer
+    temperatureBuffer[currentTempBufferIndex] = temperature;
+    // Increment the index, wrapping around to the start of the buffer if necessary
+    currentTempBufferIndex = (currentTempBufferIndex + 1) % BUFFER_SIZE;
+}
+
+float calculateAverageTemp()
+{
+    // Calculate the average temperature from the buffer values
+    float sum = 0;
+    int count = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++)
+    {
+        if (temperatureBuffer[i] != 0)
+        {
+            sum += temperatureBuffer[i];
+            count++;
+        }
+    }
+    return sum / count;
+}
+
 
 void app_main()
 {
-    // GPIO 2 is the built-in LED on the ESP32, turn it on and off every second
-    gpio_pad_select_gpio(2); // GPIO 2 is the built-in LED on the ESP32
-    gpio_set_direction(2, GPIO_MODE_OUTPUT);
+    gpio_pad_select_gpio(LED_GPIO); 
+    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
+    gpio_pad_select_gpio(POWER_GPIO); 
+    gpio_set_direction(POWER_GPIO, GPIO_MODE_OUTPUT);
+    // gpio_pad_select_gpio(36); 
+    // gpio_set_direction(36, GPIO_MODE_INPUT);
 
-    gpio_pad_select_gpio(12); // GPIO 12 is connected to the relay module
-    gpio_set_direction(12, GPIO_MODE_OUTPUT);
-
-    gpio_pad_select_gpio(36); // GPIO 36 is the ADC pin for the thermistor
-    gpio_set_direction(36, GPIO_MODE_INPUT);
-
-    while (1)
+    while (true)
     {
-        // printf("Turning on\n");
-        gpio_set_level(2, 1);
-        // gpio_set_level(12, 1);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        gpio_set_level(LED_GPIO, 1);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        gpio_set_level(LED_GPIO, 0);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
 
-        // printf("Turning off\n");
-        gpio_set_level(2, 0);
-        // gpio_set_level(12, 0);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
 
-        // read the ADC value from the thermistor
+        float temp = readTemperature();
 
-        int adc_reading = adc1_get_raw(ADC1_CHANNEL_0);
-        // printf("ADC Reading: %d\n", adc_reading);
+        // Calculate the difference from the current temperature to the last measured temperature
+        float diff = 0;
+        if (currentTempBufferIndex > 0)
+        {
+            diff = temp - temperatureBuffer[currentTempBufferIndex - 1];
+        }
 
-        // convert the ADC value to a voltage
-        float voltage = (adc_reading * 3.3) / 4095;
-        printf("Voltage: %f\n", voltage);
+        // Update the temperature delta buffer
+        temperatureDeltaBuffer[currentTempDeltaBufferIndex] = diff;
+        currentTempDeltaBufferIndex = (currentTempDeltaBufferIndex + 1) % TEMP_DELTA_BUFFER_SIZE;
 
-        // convert the voltage to a celcius temperature
-        float resistance = 10 * voltage / (3.3 - voltage);
-        printf("Resistance: %f\n", resistance);
+        updateTempBuffer(temp);
 
-        float tempKelvin = 1 / (1 / (273.15 + 25) + log(resistance / 10) / 3950.0);
-        float tempCelsius = tempKelvin - 273.15;
 
-        printf("Temperature: %f\n", tempCelsius);
+
+        // vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+        float averageTemp = calculateAverageTemp();
+
+        // printf("Temp: %f\n", temp);
+        printf("Diff: %f\n", diff);
+        // printf("Average Temp: %f\n", averageTemp);
+
+    
     }
 }
