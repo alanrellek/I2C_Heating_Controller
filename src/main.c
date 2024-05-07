@@ -1,6 +1,7 @@
 // include the necessary libraries
 #include <stdio.h>
 #include <math.h>
+#include <string.h> // Include the header file for the strcmp function
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "rom/gpio.h"
@@ -13,12 +14,16 @@
 
 #define TARGET_TEMP 35
 
-#define TEMP_BUFFER_SIZE 10
+#define TEMP_BUFFER_SIZE 100
 #define TEMP_DELTA_BUFFER_SIZE 10
 #define TEMP_TARGET_DELTA_BUFFER_SIZE 10
 #define AV_TEMP_BUFFER_SIZE 10
 
+char state[10] = "unknown";
+float power_setting = 0.5;
 float correction_power = 0.5;
+float hold_power = 0.5;
+
 float control_cycle = 1;
 
 float temperatureBuffer[TEMP_BUFFER_SIZE];
@@ -37,7 +42,7 @@ float readTemperature()
 {
     // Configure ADC
     adc1_config_width(ADC_WIDTH_BIT_12);                        // Configure ADC to 12-bit resolution
-    adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11); // Configure attenuation for the pin
+    adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_12); // Configure attenuation for the pin
 
     // read the ADC value from the thermistor
     int adc_reading = adc1_get_raw(ADC1_CHANNEL_0);
@@ -45,11 +50,11 @@ float readTemperature()
 
     // convert the ADC value to a voltage
     float voltage = (adc_reading * 3.3) / 4095;
-    // printf("Voltage: %f\n", voltage);
+    // printf("Voltage: %.3f\n", voltage);
 
     // convert the voltage to a celcius temperature
     float resistance = 10 * voltage / (3.3 - voltage);
-    // printf("Resistance: %f\n", resistance);
+    // printf("Resistance: %.3f\n", resistance);
 
     float tempKelvin = 1 / (1 / (273.15 + 25) + log(resistance / 10) / 3950.0);
     float tempCelsius = tempKelvin - 273.15;
@@ -105,6 +110,11 @@ float calculateAverageTemp()
     return sum / count;
 }
 
+float roundTo3Places(float number)
+{
+    return roundf(number * 1000) / 1000;
+}
+
 void app_main()
 {
     gpio_pad_select_gpio(LED_GPIO);
@@ -118,7 +128,6 @@ void app_main()
 
     while (true)
     {
-
         // gpio_set_level(LED_GPIO, 1);
         // vTaskDelay(100 / portTICK_PERIOD_MS);
         // gpio_set_level(LED_GPIO, 0);
@@ -142,25 +151,103 @@ void app_main()
         float one_second_old_last_av_temp = averageTemperatureBuffer[9];
         float one_s_trend = average_temp - one_second_old_last_av_temp;
 
+        // Calculate Temperature Trend from average temperature delta over all values within the last 10s
+        float ten_s_temp_trend = 1;
+
         // Update the temperature-target delta buffer
         float target_delta = TARGET_TEMP - average_temp;
         updateTargetTempDeltaBuffer(target_delta);
         float one_s_old_target_delta = temperatureTargetDeltaBuffer[9];
         float one_s_target_delta_trend = target_delta - one_s_old_target_delta;
 
-
         // -------------------------------------------------------- CONTROL LOGIC
-        if (target_delta > 0.5) // action required
-        {
+
+        if (strcmp(state, "unknown") == 0 && (target_delta < -0.5))
+        { // Unknown -> Cooling
+            printf(" Unknown -> Cooling \n");
+            strcpy(state, "cooling");
+            power_setting = 0;
         }
-        else // NO action required, target within bounds
-        {
-            continue;
+
+        else if (strcmp(state, "unknown") == 0 && (target_delta > 0.5))
+        { // Unknown -> Heating
+            printf(" Unknown -> Heating");
+            strcpy(state, "heating");
+            power_setting = correction_power;
         }
+
+        else if (strcmp(state, "unknown") == 0 && (target_delta < 0.5 && target_delta > -0.5))
+        { // Unknown -> Holding
+            printf(" Unknown -> Holding \n");
+            strcpy(state, "holding");
+            power_setting = hold_power;
+        }
+
+        // else if (strcmp(state, "heating") & (target_delta > 0.5 && ten_s_temp_trend < 1))
+        // { // Heating -> Temp not rising enough
+        //     printf(" Heating -> Heating+ \n");
+        //     power_setting = correction_power + 0.1;
+        // }
+
+        else if (strcmp(state, "heating") == 0 && (target_delta < 0.5))
+        { // Heating -> Holding
+            printf(" Heating -> Holding \n");
+            strcpy(state, "holding");
+            power_setting = hold_power;
+        }
+
+        else if (strcmp(state, "holding") == 0 && (target_delta < -0.5))
+        { // Holding -> too hot
+            printf(" Holding -> Cooling \n");
+            strcpy(state, "cooling");
+            hold_power = hold_power - 0.1;
+            power_setting = 0;
+        }
+
+        else if (strcmp(state, "holding") == 0 && (target_delta > 0.5))
+        { // Holding -> too cold
+            printf(" Holding -> Heating \n");
+            strcpy(state, "heating");
+            hold_power = hold_power + 0.1;
+            power_setting = correction_power;
+        }
+
+        else if (strcmp(state, "cooling") == 0 && (target_delta > -0.5))
+        { // Cooling -> Holding
+            printf(" Cooling -> Holding \n");
+            strcpy(state, "holding");
+            power_setting = hold_power;
+        }
+        else
+        {
+            // Holding -> Holding
+        }
+
+        // if (target_delta > 0.5 || target_delta < -0.5) // Action required
+        // {
+        //     if (target_delta < 0)
+        //     { // Temperature too high
+        //         power_setting = power_setting - 0.1;
+        //     }
+        //     else
+        //     { // Temperature too low
+        //         power_setting = power_setting + 0.1;
+        //     }
+        // }
+        // else // NO action required, target within bounds
+        // {
+        //     continue;
+        // }
+
+        // if state is unknown and target delta is greater than 0.5 or less than -0.5
 
         // -------------------------------------------------------- CONTROL HEATER
         float cycle = control_cycle / 100;
-        if (correction_power <= cycle)
+        
+        if(power_setting ==  0){
+            gpio_set_level(HEATER_GPIO, 0);
+
+        }else if (power_setting <= cycle)
         {
             // power on
             gpio_set_level(HEATER_GPIO, 1);
@@ -170,21 +257,24 @@ void app_main()
             // power off
             gpio_set_level(HEATER_GPIO, 0);
         }
+        
 
-        printf(" | Temp: %f", temp);
-        if(one_s_trend >= 0){
-            printf(" | one_s_trend:  %f", one_s_trend);
-        }else{
-            printf(" | one_s_trend: %f", one_s_trend);
-        }
+        printf(" | Temp: %.3f", roundTo3Places(temp));
+        printf(" | State: %s", state);
+        printf(" | Power: %.3f", power_setting);
+        printf(" | CP: %.3f", correction_power);
+        printf(" | HP: %.3f", hold_power);
 
-        if(one_s_target_delta_trend >= 0){
-            printf(" | one_s_target_delta_trend:  %f", one_s_target_delta_trend);
-        }else{
-            printf(" | one_s_target_delta_trend: %f", one_s_target_delta_trend);
-        }
-        printf(" | Target Delta: %f", target_delta);
-        // printf(" | Correction power: %f", correction_power);
+        // if (one_s_trend >= 0)
+        // {
+        //     printf(" | one_s_trend:  %.3f", roundTo3Places(one_s_trend));
+        // }
+        // else
+        // {
+        //     printf(" | one_s_trend: %.3f", roundTo3Places(one_s_trend));
+        // }
+
+        printf(" | Target Delta: %.3f", roundTo3Places(target_delta));
 
         printf("\n");
 
