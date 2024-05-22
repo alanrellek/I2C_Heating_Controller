@@ -1,14 +1,12 @@
-// include the necessary libraries
 #include <stdio.h>
 #include <math.h>
-#include <string.h> // Include the header file for the strcmp function
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "rom/gpio.h"
 #include "driver/gpio.h"
 #include "driver/adc.h"
 
-#define LED_GPIO 2       // GPIO 2 is the built-in LED on the ESP32
 #define HEATER_GPIO 12   // GPIO 12 is connected to the relay module
 #define ADC1_CHANNEL_0 0 // GPIO 36 is the ADC pin for the thermistor
 
@@ -23,6 +21,7 @@ char state[10] = "unknown";
 float power_setting = 0.5;
 float correction_power = 0.5;
 float hold_power = 0.5;
+int hp_correction_countdown = 0;
 
 float control_cycle = 1;
 
@@ -117,21 +116,13 @@ float roundTo3Places(float number)
 
 void app_main()
 {
-    gpio_pad_select_gpio(LED_GPIO);
-    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
     gpio_pad_select_gpio(HEATER_GPIO);
     gpio_set_direction(HEATER_GPIO, GPIO_MODE_OUTPUT);
 
-    // gpio_pad_select_gpio(36);
-    // gpio_set_direction(36, GPIO_MODE_INPUT);
     float last_temp = 0;
 
     while (true)
     {
-        // gpio_set_level(LED_GPIO, 1);
-        // vTaskDelay(100 / portTICK_PERIOD_MS);
-        // gpio_set_level(LED_GPIO, 0);
-        // vTaskDelay(100 / portTICK_PERIOD_MS);
 
         // -------------------------------------------------------- AGGREGATE DATA FOR CONTROLLING
 
@@ -147,18 +138,9 @@ void app_main()
         last_temp = average_temp;
         updateTempDeltaBuffer(temp_delta);
 
-        // Calculate Temperature Trend from average temperature delta over 1s
-        float one_second_old_last_av_temp = averageTemperatureBuffer[9];
-        float one_s_trend = average_temp - one_second_old_last_av_temp;
-
-        // Calculate Temperature Trend from average temperature delta over all values within the last 10s
-        float ten_s_temp_trend = 1;
-
         // Update the temperature-target delta buffer
         float target_delta = TARGET_TEMP - average_temp;
         updateTargetTempDeltaBuffer(target_delta);
-        float one_s_old_target_delta = temperatureTargetDeltaBuffer[9];
-        float one_s_target_delta_trend = target_delta - one_s_old_target_delta;
 
         // -------------------------------------------------------- CONTROL LOGIC
 
@@ -183,12 +165,6 @@ void app_main()
             power_setting = hold_power;
         }
 
-        // else if (strcmp(state, "heating") & (target_delta > 0.5 && ten_s_temp_trend < 1))
-        // { // Heating -> Temp not rising enough
-        //     printf(" Heating -> Heating+ \n");
-        //     power_setting = correction_power + 0.1;
-        // }
-
         else if (strcmp(state, "heating") == 0 && (target_delta < 0.5))
         { // Heating -> Holding
             printf(" Heating -> Holding \n");
@@ -200,7 +176,12 @@ void app_main()
         { // Holding -> too hot
             printf(" Holding -> Cooling \n");
             strcpy(state, "cooling");
-            hold_power = hold_power - 0.1;
+            if (hp_correction_countdown == 0)
+            {
+                hold_power = hold_power - 0.1;
+                hp_correction_countdown = 10;
+            }
+
             power_setting = 0;
         }
 
@@ -223,63 +204,35 @@ void app_main()
             // Holding -> Holding
         }
 
-        // if (target_delta > 0.5 || target_delta < -0.5) // Action required
-        // {
-        //     if (target_delta < 0)
-        //     { // Temperature too high
-        //         power_setting = power_setting - 0.1;
-        //     }
-        //     else
-        //     { // Temperature too low
-        //         power_setting = power_setting + 0.1;
-        //     }
-        // }
-        // else // NO action required, target within bounds
-        // {
-        //     continue;
-        // }
-
-        // if state is unknown and target delta is greater than 0.5 or less than -0.5
-
-        // -------------------------------------------------------- CONTROL HEATER
-        float cycle = control_cycle / 100;
-        
-        if(power_setting ==  0){
-            gpio_set_level(HEATER_GPIO, 0);
-
-        }else if (power_setting <= cycle)
-        {
-            // power on
-            gpio_set_level(HEATER_GPIO, 1);
-        }
-        else
-        {
-            // power off
-            gpio_set_level(HEATER_GPIO, 0);
-        }
-        
-
         printf(" | Temp: %.3f", roundTo3Places(temp));
         printf(" | State: %s", state);
         printf(" | Power: %.3f", power_setting);
         printf(" | CP: %.3f", correction_power);
         printf(" | HP: %.3f", hold_power);
-
-        // if (one_s_trend >= 0)
-        // {
-        //     printf(" | one_s_trend:  %.3f", roundTo3Places(one_s_trend));
-        // }
-        // else
-        // {
-        //     printf(" | one_s_trend: %.3f", roundTo3Places(one_s_trend));
-        // }
-
         printf(" | Target Delta: %.3f", roundTo3Places(target_delta));
-
         printf("\n");
+
+        // -------------------------------------------------------- CONTROL HEATER
+        float cycle = control_cycle / 100;
+
+        if (power_setting == 0)
+        {
+            gpio_set_level(HEATER_GPIO, 0);
+        }
+        else if (power_setting <= cycle)
+        {
+            // power off
+            gpio_set_level(HEATER_GPIO, 0);
+        }
+        else
+        {
+            // power on
+            gpio_set_level(HEATER_GPIO, 1);
+        }
 
         vTaskDelay(100 / portTICK_PERIOD_MS);
 
+        // -------------------------------------------------------- Reset cycles and counters
         if (control_cycle == 100)
         {
             control_cycle = 0;
@@ -287,6 +240,11 @@ void app_main()
         else
         {
             control_cycle++;
+        }
+
+        if (hp_correction_countdown > 0)
+        {
+            hp_correction_countdown--;
         }
     }
 }
